@@ -276,6 +276,90 @@ function createServer() {
     }
   );
 
+  server.registerTool(
+    "get_market_news",
+    {
+      description:
+        "Returns simulated market-news articles for testing. This tool does not fetch real news yet. Never treat its output as current news or trading advice.",
+      inputSchema: {
+        category: z
+          .enum(["general", "forex"])
+          .default("forex")
+          .describe("News category: general or forex"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .default(5)
+          .describe("Number of simulated articles to return, from 1 to 10"),
+      },
+    },
+    async ({ category, limit }) => {
+      const mockArticles = [
+        {
+          headline: "SIMULATED: Central bank policy outlook",
+          source: "Mock News Service",
+          summary:
+            "Artificial test article about possible changes in central bank policy. This is not a real news report.",
+          related: "EUR,USD",
+        },
+        {
+          headline: "SIMULATED: Currency markets monitor inflation data",
+          source: "Mock News Service",
+          summary:
+            "Artificial test article about inflation releases and currency volatility. No actual economic event is being reported.",
+          related: "EUR,GBP,USD",
+        },
+        {
+          headline: "SIMULATED: Traders watch global risk sentiment",
+          source: "Mock News Service",
+          summary:
+            "Artificial test article about risk sentiment affecting foreign exchange markets. It does not describe current market conditions.",
+          related: "USD,JPY",
+        },
+      ];
+
+      const articles = mockArticles
+        .filter((article) =>
+          category === "general"
+            ? true
+            : article.related.split(",").some((item) =>
+                ["EUR", "GBP", "USD", "JPY"].includes(item)
+              )
+        )
+        .slice(0, limit)
+        .map((article, index) => ({
+          id: `mock-${index + 1}`,
+          ...article,
+          published_at: null,
+          url: null,
+          is_simulated: true,
+        }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                category,
+                article_count: articles.length,
+                articles,
+                data_source: "mock",
+                is_simulated: true,
+                warning:
+                  "SIMULATED NEWS — These are artificial examples, not real articles. No live news was fetched. Do not use them for trading decisions.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
   return server;
 }
 
