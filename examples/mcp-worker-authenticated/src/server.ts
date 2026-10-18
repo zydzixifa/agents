@@ -501,6 +501,27 @@ function createServer(env: Env) {
         );
       }
     },
+  );  
+  
+  // TEMPORARY: deployment/schema diagnostic
+  server.registerTool(
+    "diagnostic_schema_version",
+    {
+      description:
+        "Temporary deployment diagnostic. Version FC-20261018-A.",
+      inputSchema: {},
+    },
+    async () =>
+      textResult({
+        version: "FC-20261018-A",
+        source: "FinanceCalendar",
+        expectedEconomicCalendarParameters: [
+          "from",
+          "to",
+          "impact",
+          "limit",
+        ],
+      }),
   );
 
   // 8. Supported symbols
