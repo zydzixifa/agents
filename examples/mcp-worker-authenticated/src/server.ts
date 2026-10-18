@@ -1,4 +1,3 @@
-
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
@@ -310,30 +309,99 @@ function createServer(env: Env) {
     "get_market_news",
     {
       description:
-        "Retrieve Finnhub general market news. Requires FINNHUB_API_KEY.",
+        "Retrieve compact Finnhub market news. Returns up to 10 articles by default, with a maximum of 20 and summaries capped at 500 characters. Requires FINNHUB_API_KEY.",
       inputSchema: {
-        category: z.string().optional(),
+        category: z
+          .string()
+          .optional()
+          .describe(
+            "Finnhub news category, such as general, forex, crypto, or merger.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(20)
+          .optional()
+          .describe("Maximum number of articles to return; defaults to 10."),
       },
     },
-    async ({ category }) => {
+    async ({ category, limit }) => {
       try {
         const safeCategory = category ?? "general";
+        const maxArticles = limit ?? 10;
+
         const result = await fetchFinnhub(
           env,
           `news?category=${encodeURIComponent(safeCategory)}`,
         );
+
+        if (!Array.isArray(result)) {
+          return errorResult(
+            "Finnhub returned an unexpected response format. Expected an array of news articles.",
+          );
+        }
+
+        const articles = result
+          .filter(
+            (item): item is Record<string, unknown> =>
+              typeof item === "object" &&
+              item !== null &&
+              !Array.isArray(item),
+          )
+          .map((item) => {
+            const rawSummary =
+              typeof item.summary === "string" ? item.summary : null;
+
+            return {
+              headline:
+                typeof item.headline === "string" ? item.headline : null,
+              source:
+                typeof item.source === "string" ? item.source : null,
+              publishedAt:
+                typeof item.datetime === "number" &&
+                Number.isFinite(item.datetime)
+                  ? new Date(item.datetime * 1000).toISOString()
+                  : null,
+              url: typeof item.url === "string" ? item.url : null,
+              category:
+                typeof item.category === "string" ? item.category : null,
+              summary:
+                rawSummary === null
+                  ? null
+                  : rawSummary.length > 500
+                    ? `${rawSummary.slice(0, 497)}...`
+                    : rawSummary,
+            };
+          });
+
+        const returnedArticles = articles.slice(0, maxArticles);
+
         return textResult({
           source: "Finnhub",
-          data: result,
+          isLive: true,
+          category: safeCategory,
+          articleCount: returnedArticles.length,
+          matchingArticleCount: articles.length,
+          limit: maxArticles,
+          truncated: articles.length > returnedArticles.length,
+          articles: returnedArticles,
+          caveats: [
+            "News and summaries are supplied by Finnhub and third-party publishers.",
+            "Publication timestamps are converted from Unix seconds to ISO 8601 UTC.",
+            "Summaries may be shortened; open the original article for full context.",
+          ],
         });
       } catch (error) {
         return errorResult(
-          error instanceof Error ? error.message : "Finnhub news request failed.",
+          error instanceof Error
+            ? error.message
+            : "Finnhub news request failed.",
         );
       }
     },
   );
-  
+ 
   // 7. FinanceCalendar economic calendar
   server.registerTool(
     "get_economic_calendar",
@@ -502,27 +570,6 @@ function createServer(env: Env) {
       }
     },
   );  
-  
-  // TEMPORARY: deployment/schema diagnostic
-  server.registerTool(
-    "diagnostic_schema_version",
-    {
-      description:
-        "Temporary deployment diagnostic. Version FC-20261018-A.",
-      inputSchema: {},
-    },
-    async () =>
-      textResult({
-        version: "FC-20261018-A",
-        source: "FinanceCalendar",
-        expectedEconomicCalendarParameters: [
-          "from",
-          "to",
-          "impact",
-          "limit",
-        ],
-      }),
-  );
 
   // 8. Supported symbols
   server.registerTool(
