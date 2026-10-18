@@ -101,6 +101,63 @@ function createServer() {
     }
   );
 
+  server.registerTool(
+    "get_market_quote",
+    {
+      description:
+        "Returns simulated market quote data for testing only. These are NOT live prices, market analysis, or trading signals.",
+      inputSchema: {
+        symbol: z
+          .string()
+          .regex(/^[A-Z0-9._-]{3,20}$/i)
+          .describe("Instrument symbol, e.g. EURUSD, GBPUSD, or XAUUSD"),
+      },
+    },
+    async ({ symbol }) => {
+      const normalizedSymbol = symbol.toUpperCase();
+
+      const mockQuotes: Record<
+        string,
+        { bid: number; ask: number }
+      > = {
+        EURUSD: { bid: 1.0001, ask: 1.0003 },
+        GBPUSD: { bid: 1.0002, ask: 1.0005 },
+        XAUUSD: { bid: 100.1, ask: 100.6 },
+      };
+
+      const quote = mockQuotes[normalizedSymbol];
+
+      const result = quote
+        ? {
+            symbol: normalizedSymbol,
+            bid: quote.bid,
+            ask: quote.ask,
+            spread: Number((quote.ask - quote.bid).toFixed(5)),
+            response_timestamp: new Date().toISOString(),
+            data_source: "mock",
+            is_simulated: true,
+            warning:
+              "SIMULATED TEST DATA — NOT LIVE MARKET PRICES. Do not use for trading decisions.",
+          }
+        : {
+            error: "No simulated quote is configured for this symbol.",
+            symbol: normalizedSymbol,
+            available_mock_symbols: Object.keys(mockQuotes),
+            data_source: "mock",
+            is_simulated: true,
+          };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   return server;
 }
 
