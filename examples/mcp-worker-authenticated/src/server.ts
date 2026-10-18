@@ -152,7 +152,7 @@ function createServer() {
     version: "1.0.0",
   });
 
-  server.tool(
+  server.registerTool(
     "hello",
     "Check that the Investment Journey MCP server is responding.",
     {},
@@ -163,7 +163,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "whoami",
     "Return demonstration identity information.",
     {},
@@ -176,7 +176,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_data_status",
     "Check server and data provider integration status.",
     {},
@@ -193,7 +193,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_market_quote",
     "Get an explicitly simulated quote; this is not a live market price.",
     { symbol: z.enum(SUPPORTED_SYMBOLS) },
@@ -217,7 +217,7 @@ function createServer() {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_market_candles",
     "Get simulated OHLC candles, not real historical market data.",
     {
@@ -236,7 +236,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_market_news",
     "Retrieve Finnhub market news when its API key is configured.",
     {
@@ -268,7 +268,7 @@ function createServer() {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_economic_calendar",
     "Retrieve economic-calendar events from Finnhub.",
     {
@@ -297,7 +297,7 @@ function createServer() {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "list_symbols",
     "List available broker symbols; MetaApi integration is pending.",
     { search: z.string().max(40).optional() },
@@ -310,7 +310,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "symbol_info",
     "Retrieve broker-specific contract specifications when integrated.",
     { symbol: z.string().min(1).max(32) },
@@ -333,7 +333,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_ticks",
     "Retrieve live bid/ask ticks when MetaApi is integrated.",
     {
@@ -352,7 +352,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_rates",
     "Retrieve historical OHLC rates when MetaApi is integrated.",
     {
@@ -373,7 +373,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_market_specs",
     "Retrieve broker-specific trading specifications.",
     { symbol: z.string().min(1).max(32) },
@@ -384,7 +384,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "spread_profile",
     "Analyze spreads by hour using real tick history when integrated.",
     {
@@ -400,7 +400,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "history_coverage",
     "Check available historical coverage by timeframe.",
     { symbol: z.string().min(1).max(32) },
@@ -412,7 +412,7 @@ function createServer() {
       }),
   );
 
-  server.tool(
+  server.registerTool(
     "run_quant_equations",
     "Calculate statistics, returns, volatility, or maximum drawdown from supplied numbers.",
     {
@@ -500,7 +500,7 @@ function createServer() {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_market_summary",
     "Summarize a supplied price series without fetching live data.",
     {
@@ -530,7 +530,7 @@ function createServer() {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "compare_instruments",
     "Compare supplied instrument prices without fetching live quotes.",
     {
