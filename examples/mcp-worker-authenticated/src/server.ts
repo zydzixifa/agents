@@ -407,7 +407,7 @@ function createServer(env: Env) {
     "get_economic_calendar",
     {
       description:
-        "Retrieve economic events from FinanceCalendar for a date range, optionally filtered by impact. Returns provider-supplied event data, with missing values preserved as null and source attribution included. This is a third-party calendar, not broker data. Schema diagnostic: FC-20261018-A.",
+        "Retrieve economic events from FinanceCalendar for a date range, optionally filtered by impact. Returns provider-supplied event data, with missing values preserved as null and source attribution included. This is a third-party calendar, not broker data.",
       inputSchema: {
         from: z.string().describe("Start date in YYYY-MM-DD format."),
         to: z.string().describe("End date in YYYY-MM-DD format."),
