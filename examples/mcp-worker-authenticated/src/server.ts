@@ -1,5 +1,6 @@
+
 import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp/server";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { AuthHandler } from "./auth-handler";
@@ -11,103 +12,150 @@ interface Env {
 }
 
 const SUPPORTED_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD"] as const;
-const SUPPORTED_TIMEFRAMES = ["M15", "H1", "H4", "D1", "W1"] as const;
+const TIMEFRAMES = ["M15", "H1", "H4", "D1", "W1"] as const;
 
-const jsonResult = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
+type SymbolName = (typeof SUPPORTED_SYMBOLS)[number];
+type Timeframe = (typeof TIMEFRAMES)[number];
 
-const errorResult = (message: string) =>
-  jsonResult({ error: message });
+type Candle = {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
 
-const unavailable = (provider: string, feature: string) => ({
-  status: "not_configured",
-  provider,
-  feature,
-  message: "Live integration is not implemented or configured.",
-});
-
-function validNumbers(values: number[]): boolean {
-  return values.every(Number.isFinite);
-}
-
-function calculateStats(values: number[]) {
-  const mean =
-    values.reduce((sum, value) => sum + value, 0) / values.length;
-
-  const variance =
-    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
-    values.length;
-
-  let peak = values[0];
-  let maxDrawdown = 0;
-
-  for (const value of values) {
-    peak = Math.max(peak, value);
-    if (peak > 0) {
-      maxDrawdown = Math.max(maxDrawdown, (peak - value) / peak);
-    }
-  }
-
+function textResult(value: unknown) {
   return {
-    count: values.length,
-    mean,
-    minimum: Math.min(...values),
-    maximum: Math.max(...values),
-    populationStandardDeviation: Math.sqrt(variance),
-    maxDrawdownFraction: maxDrawdown,
+    content: [
+      {
+        type: "text" as const,
+        text:
+          typeof value === "string"
+            ? value
+            : JSON.stringify(value, null, 2),
+      },
+    ],
   };
 }
 
-function calculateReturns(prices: number[]): number[] {
+function errorResult(message: string) {
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: message }],
+  };
+}
+
+function finiteNumbers(values: number[]): boolean {
+  return values.every((value) => Number.isFinite(value));
+}
+
+function calculateStats(values: number[]) {
+  if (values.length === 0 || !finiteNumbers(values)) {
+    throw new Error("Provide at least one finite numeric value.");
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const sum = values.reduce((total, value) => total + value, 0);
+  const mean = sum / values.length;
+  const variance =
+    values.reduce((total, value) => total + (value - mean) ** 2, 0) /
+    values.length;
+
+  const median =
+    sorted.length % 2 === 1
+      ? sorted[Math.floor(sorted.length / 2)]
+      : (sorted[sorted.length / 2 - 1] +
+          sorted[sorted.length / 2]) /
+        2;
+
+  return {
+    count: values.length,
+    min: sorted[0],
+    max: sorted[sorted.length - 1],
+    mean,
+    median,
+    populationVariance: variance,
+    populationStdDev: Math.sqrt(variance),
+  };
+}
+
+function calculateReturns(values: number[]) {
+  if (values.length < 2) {
+    throw new Error("At least two prices are required.");
+  }
+  if (!finiteNumbers(values)) {
+    throw new Error("All prices must be finite numbers.");
+  }
+
   const returns: number[] = [];
 
-  for (let i = 1; i < prices.length; i++) {
-    if (prices[i - 1] === 0) {
-      throw new Error("Prices cannot contain a zero denominator.");
+  for (let i = 1; i < values.length; i++) {
+    if (values[i - 1] === 0) {
+      throw new Error("A previous price cannot be zero.");
     }
-    returns.push(prices[i] / prices[i - 1] - 1);
+    returns.push(values[i] / values[i - 1] - 1);
   }
 
   return returns;
 }
 
+function calculateMaxDrawdown(prices: number[]) {
+  if (prices.length === 0 || !finiteNumbers(prices)) {
+    throw new Error("Provide a non-empty array of finite prices.");
+  }
+
+  let peak = prices[0];
+  let maxDrawdown = 0;
+
+  for (const price of prices) {
+    peak = Math.max(peak, price);
+
+    if (peak > 0) {
+      maxDrawdown = Math.max(maxDrawdown, (peak - price) / peak);
+    }
+  }
+
+  return maxDrawdown;
+}
+
+// These candles are deterministic DEMO DATA, not historical market data.
 function makeSimulatedCandles(
-  symbol: string,
-  timeframe: string,
-  limit: number,
-) {
-  const basePrices: Record<string, number> = {
+  symbol: SymbolName,
+  timeframe: Timeframe,
+  count: number,
+): Candle[] {
+  const basePrices: Record<SymbolName, number> = {
     EURUSD: 1.08,
-    GBPUSD: 1.27,
-    XAUUSD: 2650,
+    GBPUSD: 1.29,
+    XAUUSD: 3000,
   };
 
-  const durations: Record<string, number> = {
-    M15: 900_000,
-    H1: 3_600_000,
-    H4: 14_400_000,
-    D1: 86_400_000,
-    W1: 604_800_000,
-  };
-
-  const base = basePrices[symbol] ?? 100;
-  const duration = durations[timeframe] ?? durations.H1;
+  const base = basePrices[symbol];
   const now = Date.now();
+  const intervalMs: Record<Timeframe, number> = {
+    M15: 15 * 60_000,
+    H1: 60 * 60_000,
+    H4: 4 * 60 * 60_000,
+    D1: 24 * 60 * 60_000,
+    W1: 7 * 24 * 60 * 60_000,
+  };
 
-  return Array.from({ length: limit }, (_, index) => {
-    const step = index - limit + 1;
-    const close = base * (1 + step * 0.0002);
-    const open = base * (1 + (step - 0.25) * 0.0002);
+  return Array.from({ length: count }, (_, index) => {
+    const offset = count - index - 1;
+    const wave = Math.sin(index * 1.7) * base * 0.001;
+    const open = base + wave;
+    const close = base + Math.sin((index + 1) * 1.7) * base * 0.001;
+    const spread = base * 0.0004;
 
     return {
-      timestamp: new Date(now + step * duration).toISOString(),
+      time: new Date(now - offset * intervalMs[timeframe]).toISOString(),
       open,
-      high: Math.max(open, close) * 1.0003,
-      low: Math.min(open, close) * 0.9997,
+      high: Math.max(open, close) + spread,
+      low: Math.min(open, close) - spread,
       close,
-      volume: null,
-      spread: null,
+      volume: 100 + index * 7,
     };
   });
 }
@@ -115,23 +163,19 @@ function makeSimulatedCandles(
 async function fetchFinnhub(
   env: Env,
   path: string,
-  params: Record<string, string>,
 ): Promise<unknown> {
   if (!env.FINNHUB_API_KEY) {
-    throw new Error("FINNHUB_API_KEY is not configured.");
+    throw new Error(
+      "Finnhub is not configured. Set FINNHUB_API_KEY as a Worker secret.",
+    );
   }
 
-  const url = new URL(`https://finnhub.io/api/v1${path}`);
+  const separator = path.includes("?") ? "&" : "?";
+  const url =
+    `https://finnhub.io/api/v1/${path}${separator}` +
+    `token=${encodeURIComponent(env.FINNHUB_API_KEY)}`;
 
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-
-  url.searchParams.set("token", env.FINNHUB_API_KEY);
-
-  const response = await fetch(url.toString(), {
-    headers: { Accept: "application/json" },
-  });
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(`Finnhub returned HTTP ${response.status}.`);
@@ -140,357 +184,366 @@ async function fetchFinnhub(
   return response.json();
 }
 
-function dateString(offsetDays: number): string {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() + offsetDays);
-  return date.toISOString().slice(0, 10);
+function getProviderStatus(env: Env) {
+  return {
+    finnhub: env.FINNHUB_API_KEY
+      ? "configured_not_yet_verified"
+      : "not_configured",
+    metaapi:
+      env.METAAPI_TOKEN && env.METAAPI_ACCOUNT_ID
+        ? "credentials_configured_not_yet_verified"
+        : "not_configured",
+    quotes: "simulated_demo_data_only",
+    candles: "simulated_demo_data_only",
+    orderExecution: "not_available_read_only_server",
+  };
 }
 
-function createServer() {
+function createServer(env: Env) {
   const server = new McpServer({
-    name: "investment-journey",
+    name: "MetaApi Finnhub MCP",
     version: "1.0.0",
   });
 
+  // 1. Basic health check
   server.registerTool(
     "hello",
-    "Check that the Investment Journey MCP server is responding.",
-    {},
+    {
+      description: "Check whether MCP tool execution is working.",
+      inputSchema: {},
+    },
     async () =>
-      jsonResult({
-        message: "Investment Journey MCP server is online.",
-        trading: "read-only",
+      textResult({
+        ok: true,
+        message: "Hello! MCP tool execution is working.",
       }),
   );
 
+  // 2. Authentication context
   server.registerTool(
     "whoami",
-    "Return demonstration identity information.",
-    {},
-    async () =>
-      jsonResult({
-        user: "demo-user",
-        name: "Demo User",
-        email: "demo@example.com",
-        note: "Placeholder identity, not a verified personal identity.",
-      }),
-  );
+    {
+      description: "Inspect available authenticated client metadata.",
+      inputSchema: {},
+    },
+    async (_args, context) => {
+      const auth = getMcpAuthContext();
 
-  server.registerTool(
-    "get_data_status",
-    "Check server and data provider integration status.",
-    {},
-    async () =>
-      jsonResult({
-        server: "online",
-        authentication: "OAuth enabled",
-        providers: {
-          metaapi: "not_integrated",
-          finnhub: "integration_pending",
-        },
-        trading: "read-only; no order execution tools",
-        mockData: true,
-      }),
-  );
-
-  server.registerTool(
-    "get_market_quote",
-    "Get an explicitly simulated quote; this is not a live market price.",
-    { symbol: z.enum(SUPPORTED_SYMBOLS) },
-    async ({ symbol }) => {
-      const quotes: Record<string, { bid: number; ask: number }> = {
-        EURUSD: { bid: 1.0001, ask: 1.0003 },
-        GBPUSD: { bid: 1.0002, ask: 1.0005 },
-        XAUUSD: { bid: 100.1, ask: 100.6 },
-      };
-
-      const quote = quotes[symbol];
-
-      return jsonResult({
-        symbol,
-        ...quote,
-        spread: quote.ask - quote.bid,
-        data_source: "mock",
-        is_simulated: true,
-        warning: "Illustrative values only; not live Markets4you prices.",
+      return textResult({
+        clientId: context.http?.authInfo?.clientId ?? null,
+        scopes: context.http?.authInfo?.scopes ?? [],
+        propsAvailable: Boolean(auth?.props),
+        note: "Access tokens and secret authentication values are never returned.",
       });
     },
   );
 
+  // 3. Provider status
+  server.registerTool(
+    "get_data_status",
+    {
+      description:
+        "Report configured providers and distinguish demo data from live data.",
+      inputSchema: {},
+    },
+    async () =>
+      textResult({
+        providers: getProviderStatus(env),
+        supportedSymbols: SUPPORTED_SYMBOLS,
+        warning:
+          "Configured credentials do not prove connectivity. No live quote or candle feed is implemented by this status tool.",
+      }),
+  );
+
+  // 4. Quote: intentionally simulated
+  server.registerTool(
+    "get_market_quote",
+    {
+      description:
+        "Return a clearly labelled simulated quote. This is not a live price.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+      },
+    },
+    async ({ symbol }) =>
+      textResult({
+        symbol,
+        source: "SIMULATED_DEMO",
+        isLive: false,
+        warning: "Do not use this quote for real trading decisions.",
+        bid: symbol === "XAUUSD" ? 3000.1 : 1.08,
+        ask: symbol === "XAUUSD" ? 3000.6 : 1.0802,
+        timestamp: new Date().toISOString(),
+      }),
+  );
+
+  // 5. Candles: intentionally simulated
   server.registerTool(
     "get_market_candles",
-    "Get simulated OHLC candles, not real historical market data.",
     {
-      symbol: z.enum(SUPPORTED_SYMBOLS),
-      timeframe: z.enum(SUPPORTED_TIMEFRAMES),
-      limit: z.number().int().min(1).max(10).default(5),
+      description:
+        "Return simulated demo candles. These are not real historical prices.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+        timeframe: z.enum(TIMEFRAMES),
+        count: z.number().int().min(1).max(500).optional(),
+      },
     },
-    async ({ symbol, timeframe, limit }) =>
-      jsonResult({
+    async ({ symbol, timeframe, count }) =>
+      textResult({
         symbol,
         timeframe,
-        candles: makeSimulatedCandles(symbol, timeframe, limit),
-        data_source: "mock",
-        is_simulated: true,
-        warning: "Do not use for trading, backtesting, or strategy validation.",
+        source: "SIMULATED_DEMO",
+        isLive: false,
+        candles: makeSimulatedCandles(
+          symbol,
+          timeframe,
+          count ?? 20,
+        ),
+        warning:
+          "Generated demonstration candles; not suitable for backtesting or trading.",
       }),
   );
 
+  // 6. Finnhub news
   server.registerTool(
     "get_market_news",
-    "Retrieve Finnhub market news when its API key is configured.",
     {
-      category: z.enum(["general", "forex"]).default("general"),
-      limit: z.number().int().min(1).max(10).default(5),
+      description:
+        "Retrieve Finnhub general market news. Requires FINNHUB_API_KEY.",
+      inputSchema: {
+        category: z.string().optional(),
+      },
     },
-    async ({ category, limit }, extra) => {
-      const env = (extra as unknown as { env?: Env }).env ?? {};
-
+    async ({ category }) => {
       try {
-        const result = await fetchFinnhub(env, "/news", { category });
-
-        if (!Array.isArray(result)) {
-          return errorResult("Finnhub returned an unexpected news format.");
-        }
-
-        return jsonResult({
-          provider: "Finnhub",
-          category,
-          articles: result.slice(0, limit),
-          is_simulated: false,
+        const safeCategory = category ?? "general";
+        const result = await fetchFinnhub(
+          env,
+          `news?category=${encodeURIComponent(safeCategory)}`,
+        );
+        return textResult({
+          source: "Finnhub",
+          data: result,
         });
       } catch (error) {
-        return jsonResult({
-          ...unavailable("Finnhub", "market_news"),
-          error: error instanceof Error ? error.message : "Unknown error",
-        });
+        return errorResult(
+          error instanceof Error ? error.message : "Finnhub news request failed.",
+        );
       }
     },
   );
 
+  // 7. Finnhub economic calendar
   server.registerTool(
     "get_economic_calendar",
-    "Retrieve economic-calendar events from Finnhub.",
     {
-      days_ahead: z.number().int().min(1).max(30).default(7),
+      description:
+        "Retrieve Finnhub economic calendar data for a date range.",
+      inputSchema: {
+        from: z.string().describe("Start date in YYYY-MM-DD format."),
+        to: z.string().describe("End date in YYYY-MM-DD format."),
+      },
     },
-    async ({ days_ahead }, extra) => {
-      const env = (extra as unknown as { env?: Env }).env ?? {};
+    async ({ from, to }) => {
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(from) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(to)
+      ) {
+        return errorResult("Dates must use YYYY-MM-DD format.");
+      }
 
       try {
-        const calendar = await fetchFinnhub(env, "/calendar/economic", {
-          from: dateString(0),
-          to: dateString(days_ahead),
-        });
-
-        return jsonResult({
-          provider: "Finnhub",
-          calendar,
-          is_simulated: false,
+        const result = await fetchFinnhub(
+          env,
+          `calendar/economic?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        );
+        return textResult({
+          source: "Finnhub",
+          data: result,
         });
       } catch (error) {
-        return jsonResult({
-          ...unavailable("Finnhub", "economic_calendar"),
-          error: error instanceof Error ? error.message : "Unknown error",
-        });
+        return errorResult(
+          error instanceof Error
+            ? error.message
+            : "Economic calendar request failed.",
+        );
       }
     },
   );
 
+  // 8. Supported symbols
   server.registerTool(
     "list_symbols",
-    "List available broker symbols; MetaApi integration is pending.",
-    { search: z.string().max(40).optional() },
-    async ({ search }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "list_symbols"),
-        search: search ?? null,
-        illustrative_candidates: SUPPORTED_SYMBOLS,
-        note: "Candidates are not verified against Markets4you.",
+    {
+      description: "List symbols supported by this server's tool interface.",
+      inputSchema: {},
+    },
+    async () =>
+      textResult({
+        symbols: SUPPORTED_SYMBOLS,
+        note:
+          "This is the server's configured symbol list, not a verified broker symbol list.",
       }),
   );
 
+  // 9. Symbol information
   server.registerTool(
     "symbol_info",
-    "Retrieve broker-specific contract specifications when integrated.",
-    { symbol: z.string().min(1).max(32) },
+    {
+      description: "Return basic configured metadata for a supported symbol.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+      },
+    },
     async ({ symbol }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "symbol_info"),
-        symbol: symbol.toUpperCase(),
-        required_fields: [
-          "contractSize",
-          "minVolume",
-          "maxVolume",
-          "volumeStep",
-          "digits",
-          "tickSize",
-          "tickValue",
-          "swapLong",
-          "swapShort",
-          "tradeMode",
-        ],
+      textResult({
+        symbol,
+        configured: true,
+        brokerVerified: false,
+        marketDataVerified: false,
+        note:
+          "Broker-specific contract details have not been retrieved from MetaApi.",
       }),
   );
 
+  // 10. Ticks: MetaApi not yet integrated
   server.registerTool(
     "get_ticks",
-    "Retrieve live bid/ask ticks when MetaApi is integrated.",
     {
-      symbol: z.string().min(1).max(32),
-      limit: z.number().int().min(1).max(100).default(10),
-      cursor: z.number().int().min(0).default(0),
+      description: "Get tick data when MetaApi integration is implemented.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+        limit: z.number().int().min(1).max(1000).optional(),
+      },
     },
-    async ({ symbol, limit, cursor }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "get_ticks"),
-        symbol: symbol.toUpperCase(),
-        limit,
-        cursor,
-        next_cursor: null,
-        ticks: [],
-      }),
+    async () =>
+      errorResult(
+        "MetaApi tick retrieval is not implemented. No live tick data is available.",
+      ),
   );
 
+  // 11. Rates: MetaApi not yet integrated
   server.registerTool(
     "get_rates",
-    "Retrieve historical OHLC rates when MetaApi is integrated.",
     {
-      symbol: z.string().min(1).max(32),
-      timeframe: z.enum(SUPPORTED_TIMEFRAMES),
-      limit: z.number().int().min(1).max(100).default(20),
-      cursor: z.number().int().min(0).default(0),
+      description: "Get historical broker rates when MetaApi is integrated.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+        timeframe: z.enum(TIMEFRAMES),
+        count: z.number().int().min(1).max(5000).optional(),
+      },
     },
-    async ({ symbol, timeframe, limit, cursor }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "get_rates"),
-        symbol: symbol.toUpperCase(),
-        timeframe,
-        limit,
-        cursor,
-        next_cursor: null,
-        rates: [],
-      }),
+    async () =>
+      errorResult(
+        "MetaApi historical-rate retrieval is not implemented. Use get_market_candles only to test the simulated demo response.",
+      ),
   );
 
+  // 12. Market specifications
   server.registerTool(
     "get_market_specs",
-    "Retrieve broker-specific trading specifications.",
-    { symbol: z.string().min(1).max(32) },
-    async ({ symbol }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "market_specs"),
-        symbol: symbol.toUpperCase(),
-      }),
+    {
+      description:
+        "Retrieve broker contract specifications when MetaApi is integrated.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+      },
+    },
+    async () =>
+      errorResult(
+        "Broker market specifications are unavailable until MetaApi integration is implemented and verified.",
+      ),
   );
 
+  // 13. Spread profile
   server.registerTool(
     "spread_profile",
-    "Analyze spreads by hour using real tick history when integrated.",
     {
-      symbol: z.string().min(1).max(32),
-      days: z.number().int().min(1).max(90).default(14),
+      description:
+        "Analyze historical spreads once real broker tick data is available.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+      },
     },
-    async ({ symbol, days }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "spread_profile"),
-        symbol: symbol.toUpperCase(),
-        days,
-        hourly_spreads: [],
-      }),
+    async () =>
+      errorResult(
+        "Spread profiling requires real tick and bid/ask history, which is not yet integrated.",
+      ),
   );
 
+  // 14. History coverage
   server.registerTool(
     "history_coverage",
-    "Check available historical coverage by timeframe.",
-    { symbol: z.string().min(1).max(32) },
-    async ({ symbol }) =>
-      jsonResult({
-        ...unavailable("MetaApi", "history_coverage"),
-        symbol: symbol.toUpperCase(),
-        coverage: [],
-      }),
+    {
+      description:
+        "Check broker history coverage once MetaApi history retrieval is implemented.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+        timeframe: z.enum(TIMEFRAMES),
+      },
+    },
+    async () =>
+      errorResult(
+        "Historical coverage cannot be verified until broker history retrieval is implemented.",
+      ),
   );
 
+  // 15. Quantitative calculations
   server.registerTool(
     "run_quant_equations",
-    "Calculate statistics, returns, volatility, or maximum drawdown from supplied numbers.",
     {
-      operation: z.enum([
-        "statistics",
-        "returns",
-        "volatility",
-        "max_drawdown",
-      ]),
-      values: z.array(z.number()).min(1).max(1000),
-      periods_per_year: z.number().int().min(1).max(100000).default(252),
+      description:
+        "Calculate descriptive statistics, returns, volatility and drawdown from supplied numbers.",
+      inputSchema: {
+        values: z.array(z.number()).min(1).max(10000),
+        operation: z
+          .enum(["statistics", "returns", "risk"])
+          .optional(),
+        periodsPerYear: z.number().positive().optional(),
+      },
     },
-    async ({ operation, values, periods_per_year }) => {
-      if (!validNumbers(values)) {
-        return errorResult("All values must be finite numbers.");
+    async ({ values, operation, periodsPerYear }) => {
+      if (!finiteNumbers(values)) {
+        return errorResult("All input values must be finite numbers.");
       }
 
       try {
-        if (operation === "statistics") {
-          return jsonResult({
-            operation,
-            results: calculateStats(values),
+        const selectedOperation = operation ?? "statistics";
+
+        if (selectedOperation === "statistics") {
+          return textResult({
+            operation: selectedOperation,
+            stats: calculateStats(values),
           });
         }
 
-        if (operation === "returns") {
-          return jsonResult({
-            operation,
-            returns: calculateReturns(values),
+        if (selectedOperation === "returns") {
+          return textResult({
+            operation: selectedOperation,
+            simpleReturns: calculateReturns(values),
           });
         }
 
-        if (operation === "volatility") {
-          const returns = calculateReturns(values);
+        const returns = calculateReturns(values);
+        const stats = calculateStats(returns);
+        const annualizationFactor = Math.sqrt(periodsPerYear ?? 252);
 
-          if (returns.length < 2) {
-            return errorResult(
-              "At least three price observations are required.",
-            );
-          }
-
-          const stats = calculateStats(returns);
-          const periodVolatility =
-            stats.populationStandardDeviation ?? 0;
-
-          return jsonResult({
-            operation,
-            observations: values.length,
-            return_observations: returns.length,
-            period_volatility: periodVolatility,
-            annualized_volatility:
-              periodVolatility * Math.sqrt(periods_per_year),
-            periods_per_year,
-            note: "Annualization depends on the supplied data frequency.",
-          });
-        }
-
-        if (values.some((value) => value < 0)) {
-          return errorResult(
-            "Drawdown expects a non-negative equity or portfolio-value series.",
-          );
-        }
-
-        let peak = values[0];
-        let maxDrawdown = 0;
-
-        for (const value of values) {
-          peak = Math.max(peak, value);
-
-          if (peak > 0) {
-            maxDrawdown = Math.max(maxDrawdown, (peak - value) / peak);
-          }
-        }
-
-        return jsonResult({
-          operation,
-          max_drawdown_fraction: maxDrawdown,
-          max_drawdown_percent: maxDrawdown * 100,
+        return textResult({
+          operation: selectedOperation,
+          returnCount: returns.length,
+          meanPeriodReturn: stats.mean,
+          periodVolatility: stats.populationStdDev,
+          annualizedVolatility:
+            stats.populationStdDev * annualizationFactor,
+          maxDrawdown: calculateMaxDrawdown(values),
+          assumptions: {
+            returnType: "simple returns",
+            volatility: "population standard deviation",
+            annualizationPeriods: periodsPerYear ?? 252,
+            note:
+              "Annualization factor is user-selected or defaults to 252 periods; ensure it matches the data frequency.",
+          },
         });
       } catch (error) {
         return errorResult(
@@ -500,95 +553,85 @@ function createServer() {
     },
   );
 
+  // 16. Market summary: refuses to summarize fabricated prices as live
   server.registerTool(
     "get_market_summary",
-    "Summarize a supplied price series without fetching live data.",
     {
-      symbol: z.string().min(1).max(32),
-      prices: z.array(z.number()).min(2).max(1000),
+      description:
+        "Report market-data readiness for a supported symbol without inventing live analysis.",
+      inputSchema: {
+        symbol: z.enum(SUPPORTED_SYMBOLS),
+        timeframe: z.enum(TIMEFRAMES).optional(),
+      },
     },
-    async ({ symbol, prices }) => {
-      if (!validNumbers(prices) || prices[0] === 0) {
-        return errorResult(
-          "Prices must be finite and the first price must be non-zero.",
-        );
-      }
-
-      const first = prices[0];
-      const last = prices[prices.length - 1];
-
-      return jsonResult({
-        symbol: symbol.toUpperCase(),
-        observations: prices.length,
-        first_price: first,
-        latest_price: last,
-        absolute_change: last - first,
-        percentage_change: ((last / first) - 1) * 100,
-        statistics: calculateStats(prices),
-        data_source: "user_supplied",
-      });
-    },
+    async ({ symbol, timeframe }) =>
+      textResult({
+        symbol,
+        timeframe: timeframe ?? "H1",
+        liveQuoteAvailable: false,
+        liveCandlesAvailable: false,
+        summary: "Insufficient verified live market data for a market summary.",
+        nextRequirement:
+          "Integrate and verify a real market-data provider before calculating technical signals.",
+      }),
   );
 
+  // 17. Instrument comparison
   server.registerTool(
     "compare_instruments",
-    "Compare supplied instrument prices without fetching live quotes.",
     {
-      instruments: z.array(
-        z.object({
-          symbol: z.string().min(1).max(32),
-          start_price: z.number(),
-          end_price: z.number(),
-        }),
-      ).min(2).max(20),
+      description:
+        "Compare user-supplied numeric observations for two instruments.",
+      inputSchema: {
+        instrumentA: z.string().min(1),
+        valuesA: z.array(z.number()).min(1).max(10000),
+        instrumentB: z.string().min(1),
+        valuesB: z.array(z.number()).min(1).max(10000),
+      },
     },
-    async ({ instruments }) => {
+    async ({ instrumentA, valuesA, instrumentB, valuesB }) => {
       if (
-        !instruments.every(
-          (item) =>
-            Number.isFinite(item.start_price) &&
-            Number.isFinite(item.end_price),
-        )
+        !finiteNumbers(valuesA) ||
+        !finiteNumbers(valuesB)
       ) {
-        return errorResult("All prices must be finite numbers.");
+        return errorResult("All values must be finite numbers.");
       }
 
-      return jsonResult({
-        comparisons: instruments.map((item) => {
-          if (item.start_price === 0) {
-            return {
-              symbol: item.symbol.toUpperCase(),
-              error: "Start price cannot be zero.",
-            };
-          }
-
-          return {
-            symbol: item.symbol.toUpperCase(),
-            start_price: item.start_price,
-            end_price: item.end_price,
-            absolute_change: item.end_price - item.start_price,
-            percentage_change:
-              ((item.end_price / item.start_price) - 1) * 100,
-          };
-        }),
-        data_source: "user_supplied",
-        note: "Different instruments may have different units and risks.",
-      });
+      try {
+        return textResult({
+          instrumentA: {
+            name: instrumentA,
+            statistics: calculateStats(valuesA),
+          },
+          instrumentB: {
+            name: instrumentB,
+            statistics: calculateStats(valuesB),
+          },
+          note:
+            "This compares supplied numbers only; it does not fetch market data or imply that the series have matching frequencies.",
+        });
+      } catch (error) {
+        return errorResult(
+          error instanceof Error ? error.message : "Comparison failed.",
+        );
+      }
     },
   );
 
   return server;
 }
 
-const mcpHandler = createMcpHandler(createServer);
-
 const apiHandler = {
-  fetch(
-    request: Request,
-    env: unknown,
-    ctx: ExecutionContext,
-  ) {
-    return mcpHandler(request, env, ctx);
+  fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+    const workerEnv = env as Env;
+
+    // Build a fresh SDK v2 server for each request, with this request's
+    // environment captured for provider calls.
+    return createMcpHandler(() => createServer(workerEnv))(
+      request,
+      env,
+      ctx,
+    );
   },
 };
 
