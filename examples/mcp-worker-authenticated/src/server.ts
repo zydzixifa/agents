@@ -71,6 +71,36 @@ function createServer() {
     }
   );
 
+  server.registerTool(
+    "get_data_status",
+    {
+      description:
+        "Reports the current integration status of the read-only trading data providers."
+    },
+    async () => {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                server: "online",
+                authentication: "OAuth enabled",
+                providers: {
+                  metaapi: "not integrated",
+                  finnhub: "not integrated"
+                },
+                trading: "read-only; no order execution tools"
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+  );
+
   return server;
 }
 
