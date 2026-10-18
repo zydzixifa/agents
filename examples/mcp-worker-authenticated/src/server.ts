@@ -333,40 +333,171 @@ function createServer(env: Env) {
       }
     },
   );
-
-  // 7. Finnhub economic calendar
+  
+  // 7. FinanceCalendar economic calendar
   server.registerTool(
     "get_economic_calendar",
     {
       description:
-        "Retrieve Finnhub economic calendar data for a date range.",
+        "Retrieve economic events from FinanceCalendar for a date range, optionally filtered by impact. Returns provider-supplied event data, with missing values preserved as null and source attribution included. This is a third-party calendar, not broker data.",
       inputSchema: {
         from: z.string().describe("Start date in YYYY-MM-DD format."),
         to: z.string().describe("End date in YYYY-MM-DD format."),
+        impact: z
+          .enum(["all", "low", "medium", "high"])
+          .optional()
+          .describe("Optional impact filter; defaults to all."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Maximum number of returned events; defaults to 50."),
       },
     },
-    async ({ from, to }) => {
-      if (
-        !/^\d{4}-\d{2}-\d{2}$/.test(from) ||
-        !/^\d{4}-\d{2}-\d{2}$/.test(to)
-      ) {
-        return errorResult("Dates must use YYYY-MM-DD format.");
+    async ({ from, to, impact, limit }) => {
+      const parseDate = (value: string): number | null => {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+          return null;
+        }
+
+        const timestamp = Date.parse(`${value}T00:00:00Z`);
+        if (!Number.isFinite(timestamp)) {
+          return null;
+        }
+
+        return new Date(timestamp).toISOString().slice(0, 10) === value
+          ? timestamp
+          : null;
+      };
+
+      const fromMs = parseDate(from);
+      const toMs = parseDate(to);
+
+      if (fromMs === null || toMs === null) {
+        return errorResult(
+          "Invalid date. Both dates must be real calendar dates in YYYY-MM-DD format.",
+        );
       }
 
-      try {
-        const result = await fetchFinnhub(
-          env,
-          `calendar/economic?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      if (fromMs > toMs) {
+        return errorResult(
+          "The start date must be on or before the end date.",
         );
+      }
+
+      const dayCount = (toMs - fromMs) / 86_400_000 + 1;
+      if (dayCount > 62) {
+        return errorResult(
+          "Date range is too large. Request no more than 62 calendar days at a time.",
+        );
+      }
+
+      const maxEvents = limit ?? 50;
+      const selectedImpact = impact ?? "all";
+
+      try {
+        const url = new URL(
+          "https://www.financecalendar.com/wp-json/fc/v1/calendar",
+        );
+        url.searchParams.set("from", from);
+        url.searchParams.set("to", to);
+
+        // Ask the provider to filter when supported; also filter locally
+        // below so the returned events obey the requested impact.
+        if (selectedImpact !== "all") {
+          url.searchParams.set("impact", selectedImpact);
+        }
+
+        const response = await fetch(url.toString(), {
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          return errorResult(
+            `FinanceCalendar returned HTTP ${response.status}. The calendar request could not be completed.`,
+          );
+        }
+
+        const payload: unknown = await response.json();
+
+        if (
+          typeof payload !== "object" ||
+          payload === null ||
+          !("events" in payload) ||
+          !Array.isArray(payload.events)
+        ) {
+          return errorResult(
+            "FinanceCalendar returned an unexpected response format. Expected an object containing an events array.",
+          );
+        }
+
+        const events = payload.events.filter(
+          (event): event is Record<string, unknown> =>
+            typeof event === "object" &&
+            event !== null &&
+            !Array.isArray(event),
+        );
+
+        const normalized = events
+          .filter((event) => {
+            const eventImpact =
+              typeof event.impact === "string"
+                ? event.impact.toLowerCase()
+                : "";
+
+            return (
+              selectedImpact === "all" ||
+              eventImpact === selectedImpact
+            );
+          })
+          .map((event) => ({
+            date: event.date ?? null,
+            timeUtc: event.time_utc ?? null,
+            allDay: event.all_day ?? false,
+            name: event.name ?? null,
+            title: event.title ?? null,
+            impact: event.impact ?? null,
+            category: event.category ?? null,
+            consensus: event.consensus ?? null,
+            prior: event.prior ?? null,
+            actual: event.actual ?? null,
+            url: event.url ?? null,
+          }));
+
+        const returnedEvents = normalized.slice(0, maxEvents);
+
         return textResult({
-          source: "Finnhub",
-          data: result,
+          source: "FinanceCalendar",
+          isLive: true,
+          requestedRange: { from, to },
+          impactFilter: selectedImpact,
+          eventCount: returnedEvents.length,
+          matchingEventCount: normalized.length,
+          truncated: normalized.length > returnedEvents.length,
+          events: returnedEvents,
+          attribution: {
+            source: "FinanceCalendar",
+            url: "https://www.financecalendar.com",
+            terms:
+              "Free for any use with attribution. Include a link to FinanceCalendar.",
+            documentation: "https://www.financecalendar.com/api/",
+          },
+          caveats: [
+            "Events and economic figures are provider-supplied and have not been independently verified.",
+            "A null event time means the provider did not supply a time.",
+            "Null consensus, prior, or actual values mean the data was unavailable; they must not be interpreted as zero.",
+            "This calendar does not provide broker quotes or guarantee that every relevant event is included.",
+          ],
         });
       } catch (error) {
         return errorResult(
           error instanceof Error
-            ? error.message
-            : "Economic calendar request failed.",
+            ? `FinanceCalendar request failed: ${error.message}`
+            : "FinanceCalendar request failed unexpectedly.",
         );
       }
     },
