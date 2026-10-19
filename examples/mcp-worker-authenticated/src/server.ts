@@ -470,6 +470,453 @@ function calculateMeanTTest(
   };
 }
 
+function normalSurvival(x: number): number {
+  // Approximation to P(Z > x), for x >= 0.
+  // Absolute error is suitable for this lightweight, dependency-free tool.
+  if (!Number.isFinite(x) || x < 0) {
+    throw new Error("Normal survival function requires a finite nonnegative input.");
+  }
+
+  if (x > 38) return 0;
+
+  const t = 1 / (1 + 0.2316419 * x);
+  const polynomial =
+    t *
+    (0.319381530 +
+      t *
+        (-0.356563782 +
+          t *
+            (1.781477937 +
+              t * (-1.821255978 + t * 1.330274429))));
+
+  return Math.max(
+    0,
+    Math.min(
+      0.5,
+      (Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI)) *
+        polynomial,
+    ),
+  );
+}
+
+function normalCdf(x: number): number {
+  if (!Number.isFinite(x)) {
+    throw new Error("Normal CDF requires a finite input.");
+  }
+
+  return x >= 0
+    ? 1 - normalSurvival(x)
+    : normalSurvival(-x);
+}
+
+function normalQuantile(probability: number): number {
+  if (
+    !Number.isFinite(probability) ||
+    probability <= 0 ||
+    probability >= 1
+  ) {
+    throw new Error("Normal quantile probability must be between 0 and 1.");
+  }
+
+  if (probability === 0.5) return 0;
+
+  // Bisection avoids another special-function implementation.
+  let lower = -10;
+  let upper = 10;
+
+  for (let i = 0; i < 120; i++) {
+    const midpoint = lower + (upper - lower) / 2;
+
+    if (normalCdf(midpoint) < probability) {
+      lower = midpoint;
+    } else {
+      upper = midpoint;
+    }
+  }
+
+  return lower + (upper - lower) / 2;
+}
+
+function calculateHacMeanTTest(
+  values: number[],
+  alternative: "greater" | "two-sided",
+  alpha: number,
+) {
+  if (values.length < 2 || !finiteNumbers(values)) {
+    throw new Error(
+      "The HAC mean test requires at least two finite return observations.",
+    );
+  }
+
+  if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) {
+    throw new Error("alpha must be strictly between 0 and 1.");
+  }
+
+  const stats = calculateStats(values);
+  const n = values.length;
+  const mean = stats.mean;
+  const demeaned = values.map((value) => value - mean);
+
+  const gamma0 =
+    demeaned.reduce((sum, value) => sum + value * value, 0) / n;
+
+  if (!Number.isFinite(gamma0) || gamma0 <= 0) {
+    throw new Error(
+      "The HAC mean test requires nonzero, numerically usable return variance.",
+    );
+  }
+
+  let lagNumerator = 0;
+
+  for (let i = 1; i < n; i++) {
+    lagNumerator += demeaned[i] * demeaned[i - 1];
+  }
+
+  if (!Number.isFinite(lagNumerator)) {
+    throw new Error("Autocorrelation calculation overflowed.");
+  }
+
+  // AR(1) coefficient estimate based on demeaned observations.
+  const rho = Math.max(
+    -1,
+    Math.min(1, lagNumerator / (n * gamma0)),
+  );
+
+  // Andrews-style AR(1) plug-in bandwidth for the Bartlett kernel.
+  // For near-unit positive autocorrelation, the bandwidth is capped
+  // rather than allowing the plug-in expression to overflow.
+  let rawBandwidth: number;
+
+  if (rho >= 0.99) {
+    rawBandwidth = n - 1;
+  } else {
+    const denominator = (1 - rho) ** 4;
+    const plugIn = (4 * rho * rho * n) / denominator;
+
+    rawBandwidth =
+      plugIn === 0 ? 0 : 1.1447 * Math.cbrt(plugIn);
+  }
+
+  if (!Number.isFinite(rawBandwidth)) {
+    rawBandwidth = n - 1;
+  }
+
+  const selectedLag = Math.max(
+    0,
+    Math.min(n - 1, Math.round(rawBandwidth)),
+  );
+
+  let longRunVariance = gamma0;
+
+  for (let lag = 1; lag <= selectedLag; lag++) {
+    let covarianceSum = 0;
+
+    for (let t = lag; t < n; t++) {
+      covarianceSum += demeaned[t] * demeaned[t - lag];
+    }
+
+    const gammaLag = covarianceSum / n;
+    const bartlettWeight = 1 - lag / (selectedLag + 1);
+
+    longRunVariance += 2 * bartlettWeight * gammaLag;
+  }
+
+  if (
+    !Number.isFinite(longRunVariance) ||
+    longRunVariance <= 0
+  ) {
+    throw new Error(
+      "The HAC long-run variance is nonpositive or numerically unusable for this sample.",
+    );
+  }
+
+  const hacVarianceOfMean = longRunVariance / n;
+  const hacStandardError = Math.sqrt(hacVarianceOfMean);
+  const zStatistic = mean / hacStandardError;
+
+  if (
+    !Number.isFinite(hacVarianceOfMean) ||
+    hacVarianceOfMean <= 0 ||
+    !Number.isFinite(hacStandardError) ||
+    !Number.isFinite(zStatistic)
+  ) {
+    throw new Error("The HAC mean test produced an invalid statistic.");
+  }
+
+  const pValue =
+    alternative === "greater"
+      ? zStatistic >= 0
+        ? normalSurvival(zStatistic)
+        : 1 - normalSurvival(-zStatistic)
+      : 2 * normalSurvival(Math.abs(zStatistic));
+
+  const criticalValue = normalQuantile(
+    alternative === "greater" ? 1 - alpha : 1 - alpha / 2,
+  );
+
+  const confidenceInterval =
+    alternative === "greater"
+      ? {
+          level: 1 - alpha,
+          type: "one-sided_lower_bound",
+          lowerBound: mean - criticalValue * hacStandardError,
+          upperBound: null,
+        }
+      : {
+          level: 1 - alpha,
+          type: "two-sided_interval",
+          lowerBound: mean - criticalValue * hacStandardError,
+          upperBound: mean + criticalValue * hacStandardError,
+        };
+
+  if (
+    !Number.isFinite(pValue) ||
+    !Number.isFinite(confidenceInterval.lowerBound) ||
+    (confidenceInterval.upperBound !== null &&
+      !Number.isFinite(confidenceInterval.upperBound))
+  ) {
+    throw new Error("The HAC mean test produced a non-finite result.");
+  }
+
+  return {
+    observationCount: n,
+    mean,
+    alternative,
+    nullMean: 0,
+    alpha,
+    estimatedLagOneAutocorrelation: rho,
+    lagSelectionMethod:
+      "Andrews-style AR(1) plug-in bandwidth; Bartlett kernel",
+    selectedLag,
+    longRunVariance,
+    hacVarianceOfMean,
+    hacStandardError,
+    zStatistic,
+    pValue: Math.max(0, Math.min(1, pValue)),
+    confidenceInterval,
+    assumptions: [
+      "Input values must be net periodic returns, not prices.",
+      "Inference uses a normal asymptotic approximation with a Bartlett-kernel HAC variance estimate.",
+      "The automatic bandwidth is a plug-in rule and may be unreliable for short samples or complex dependence.",
+      "This test does not correct for multiple testing, strategy-selection bias, look-ahead bias, or transaction costs.",
+      "A statistically significant result does not by itself establish a robust or tradable edge.",
+    ],
+  };
+}
+
+function empiricalQuantile(
+  values: number[],
+  probability: number,
+): number {
+  if (
+    values.length === 0 ||
+    !finiteNumbers(values) ||
+    !Number.isFinite(probability) ||
+    probability < 0 ||
+    probability > 1
+  ) {
+    throw new Error("Invalid empirical quantile input.");
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * probability;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  const fraction = position - lowerIndex;
+
+  return (
+    sorted[lowerIndex] * (1 - fraction) +
+    sorted[upperIndex] * fraction
+  );
+}
+
+function calculateAdvancedRisk(
+  values: number[],
+  dataType: "returns" | "equity",
+  periodsPerYear: number,
+  targetReturn: number,
+  confidenceLevel: number,
+) {
+  if (values.length < 2 || !finiteNumbers(values)) {
+    throw new Error(
+      "Advanced risk requires at least two finite observations.",
+    );
+  }
+
+  if (
+    !Number.isFinite(periodsPerYear) ||
+    periodsPerYear <= 0
+  ) {
+    throw new Error("periodsPerYear must be positive and finite.");
+  }
+
+  if (!Number.isFinite(targetReturn)) {
+    throw new Error("targetReturn must be finite.");
+  }
+
+  if (
+    !Number.isFinite(confidenceLevel) ||
+    confidenceLevel <= 0 ||
+    confidenceLevel >= 1
+  ) {
+    throw new Error("confidenceLevel must be strictly between 0 and 1.");
+  }
+
+  let returns: number[];
+  let equity: number[];
+
+  if (dataType === "equity") {
+    if (values.some((value) => value <= 0)) {
+      throw new Error(
+        "Equity-curve values must be strictly positive.",
+      );
+    }
+
+    equity = [...values];
+    returns = calculateReturns(equity);
+  } else {
+    if (values.some((value) => value <= -1)) {
+      throw new Error(
+        "Return-series inputs must be greater than -1 to derive a positive compounded equity curve.",
+      );
+    }
+
+    returns = [...values];
+    equity = [1];
+
+    for (const value of returns) {
+      const nextEquity = equity[equity.length - 1] * (1 + value);
+
+      if (!Number.isFinite(nextEquity) || nextEquity <= 0) {
+        throw new Error(
+          "Compounded equity became non-finite or nonpositive.",
+        );
+      }
+
+      equity.push(nextEquity);
+    }
+  }
+
+  const stats = calculateStats(returns);
+  const sampleStdDev = stats.sampleStdDev;
+
+  if (sampleStdDev === null) {
+    throw new Error("Insufficient observations for sample volatility.");
+  }
+
+  const annualizationFactor = Math.sqrt(periodsPerYear);
+  const annualizedVolatility =
+    sampleStdDev * annualizationFactor;
+
+  const squaredDownside = returns.reduce((sum, value) => {
+    const shortfall = Math.min(value - targetReturn, 0);
+    return sum + shortfall * shortfall;
+  }, 0);
+
+  const downsideDeviation = Math.sqrt(
+    squaredDownside / returns.length,
+  );
+
+  const annualizedDownsideDeviation =
+    downsideDeviation * annualizationFactor;
+
+  const sortinoRatio =
+    annualizedDownsideDeviation > 0
+      ? ((stats.mean - targetReturn) * periodsPerYear) /
+        annualizedDownsideDeviation
+      : null;
+
+  const tailProbability = 1 - confidenceLevel;
+  const returnQuantile = empiricalQuantile(
+    returns,
+    tailProbability,
+  );
+
+  const tailReturns = returns.filter(
+    (value) => value <= returnQuantile,
+  );
+
+  const expectedTailReturn =
+    tailReturns.reduce((sum, value) => sum + value, 0) /
+    tailReturns.length;
+
+  const lossVaR = Math.max(0, -returnQuantile);
+  const lossExpectedShortfall = Math.max(0, -expectedTailReturn);
+
+  const maxDrawdown = calculateMaxDrawdown(equity);
+  const periodCount = returns.length;
+  const firstEquity = equity[0];
+  const finalEquity = equity[equity.length - 1];
+
+  const annualizedGeometricReturn = Math.expm1(
+    ((Math.log(finalEquity) - Math.log(firstEquity)) *
+      periodsPerYear) /
+      periodCount,
+  );
+
+  const calmarRatio =
+    maxDrawdown > 0
+      ? annualizedGeometricReturn / maxDrawdown
+      : null;
+
+  const numericResults = [
+    annualizedVolatility,
+    downsideDeviation,
+    annualizedDownsideDeviation,
+    lossVaR,
+    lossExpectedShortfall,
+    maxDrawdown,
+    annualizedGeometricReturn,
+  ];
+
+  if (
+    !finiteNumbers(numericResults) ||
+    (sortinoRatio !== null && !Number.isFinite(sortinoRatio)) ||
+    (calmarRatio !== null && !Number.isFinite(calmarRatio))
+  ) {
+    throw new Error("Advanced risk calculation produced a non-finite result.");
+  }
+
+  return {
+    dataType,
+    returnObservationCount: returns.length,
+    meanPeriodReturn: stats.mean,
+    samplePeriodVolatility: sampleStdDev,
+    annualizedVolatility,
+    targetReturnPerPeriod: targetReturn,
+    downsideDeviationPerPeriod: downsideDeviation,
+    annualizedDownsideDeviation,
+    sortinoRatio,
+    historicalVaR: {
+      confidenceLevel,
+      tailProbability,
+      loss: lossVaR,
+      returnQuantile,
+      quantileMethod:
+        "Linear interpolation at position (n - 1) * probability",
+    },
+    historicalExpectedShortfall: {
+      confidenceLevel,
+      loss: lossExpectedShortfall,
+      tailObservationCount: tailReturns.length,
+      method:
+        "Mean of observed returns at or below the empirical lower-tail quantile; expressed as a nonnegative loss",
+    },
+    maxDrawdown,
+    annualizedGeometricReturn,
+    calmarRatio,
+    annualizationPeriods: periodsPerYear,
+    conventions: [
+      "Volatility uses sample standard deviation.",
+      "Downside deviation uses the mean squared shortfall across all return observations.",
+      "Sortino ratio annualizes the periodic mean excess return and downside deviation.",
+      "VaR and expected shortfall are historical estimates and can be unstable with small samples.",
+      "Calmar ratio is unavailable when maximum drawdown is zero.",
+      "Ratios are descriptive statistics, not forecasts or guarantees of future performance.",
+    ],
+  };
+}
+
 // These candles are deterministic DEMO DATA, not historical market data.
 function makeSimulatedCandles(
   symbol: SymbolName,
@@ -1105,21 +1552,55 @@ function createServer(env: Env) {
     "run_quant_equations",
     {
       description:
-        "Calculate descriptive statistics, simple returns, volatility, maximum drawdown, and a one-sample mean t-test from supplied numeric observations. Does not fetch market data or generate trading signals.",
+        "Calculate descriptive statistics, simple returns, volatility, maximum drawdown, a one-sample mean t-test, a Newey-West HAC mean-return test, and advanced risk metrics from supplied numeric observations. Does not fetch market data or generate trading signals.",
       inputSchema: {
         values: z
           .array(z.number())
           .min(1)
           .max(10000)
           .describe(
-            "Numeric observations in chronological order, oldest first. For meanTTest, supply net periodic returns, not prices.",
+            "Numeric observations in chronological order, oldest first. For meanTTest and hacMeanTTest, supply net periodic returns, not prices.",
           ),
+
         operation: z
-          .enum(["statistics", "returns", "risk", "meanTTest"])
+          .enum([
+            "statistics",
+            "returns",
+            "risk",
+            "meanTTest",
+            "hacMeanTTest",
+            "advancedRisk",
+          ])
           .optional()
           .describe(
-            "Calculation to perform; defaults to descriptive statistics.",
+            "Calculation to perform; defaults to descriptive statistics. hacMeanTTest uses Newey-West HAC inference. advancedRisk calculates additional risk metrics.",
           ),
+
+        dataType: z
+          .enum(["returns", "equity"])
+          .optional()
+          .describe(
+            "Required for advancedRisk: returns means periodic simple returns; equity means a strictly positive chronological equity curve.",
+          ),
+
+        targetReturn: z
+          .number()
+          .finite()
+          .optional()
+          .describe(
+            "For advancedRisk: periodic target return used for downside deviation and the Sortino ratio. Defaults to zero.",
+          ),
+
+        confidenceLevel: z
+          .number()
+          .finite()
+          .gt(0)
+          .lt(1)
+          .optional()
+          .describe(
+            "For advancedRisk: confidence level for historical VaR and expected shortfall. Defaults to 0.95.",
+          ),
+
         periodsPerYear: z
           .number()
           .finite()
@@ -1129,12 +1610,14 @@ function createServer(env: Env) {
           .describe(
             "Annualization periods for risk calculations. Defaults to 252.",
           ),
+
         alternative: z
           .enum(["greater", "two-sided"])
           .optional()
           .describe(
-            "For meanTTest: test whether the mean return is positive or differs from zero. Defaults to greater.",
+            "For meanTTest and hacMeanTTest: test whether the mean return is positive or differs from zero. Defaults to greater.",
           ),
+
         alpha: z
           .number()
           .finite()
@@ -1142,13 +1625,16 @@ function createServer(env: Env) {
           .lt(1)
           .optional()
           .describe(
-            "For meanTTest: significance level strictly between 0 and 1. Defaults to 0.05.",
+            "For meanTTest and hacMeanTTest: significance level strictly between 0 and 1. Defaults to 0.05.",
           ),
       },
     },
     async ({
       values,
       operation,
+      dataType,
+      targetReturn,
+      confidenceLevel,
       periodsPerYear,
       alternative,
       alpha,
@@ -1191,6 +1677,37 @@ function createServer(env: Env) {
           });
         }
 
+        if (selectedOperation === "hacMeanTTest") {
+          return textResult({
+            operation: selectedOperation,
+            ...calculateHacMeanTTest(
+              values,
+              alternative ?? "greater",
+              alpha ?? 0.05,
+            ),
+          });
+        }
+
+        if (selectedOperation === "advancedRisk") {
+          if (!dataType) {
+            return errorResult(
+              "advancedRisk requires dataType: 'returns' or 'equity'.",
+            );
+          }
+
+          return textResult({
+            operation: selectedOperation,
+            ...calculateAdvancedRisk(
+              values,
+              dataType,
+              periodsPerYear ?? 252,
+              targetReturn ?? 0,
+              confidenceLevel ?? 0.95,
+            ),
+          });
+        }
+
+        // Existing risk calculation retained for backward compatibility.
         const returns = calculateReturns(values);
         const stats = calculateStats(returns);
         const annualizationPeriods = periodsPerYear ?? 252;
@@ -1220,7 +1737,7 @@ function createServer(env: Env) {
       }
     },
   );
-
+  
   // 16. Market summary: refuses to summarize fabricated prices as live
   server.registerTool(
     "get_market_summary",
