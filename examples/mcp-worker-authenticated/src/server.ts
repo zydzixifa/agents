@@ -57,18 +57,35 @@ function calculateStats(values: number[]) {
   }
 
   const sorted = [...values].sort((a, b) => a - b);
-  const sum = values.reduce((total, value) => total + value, 0);
-  const mean = sum / values.length;
-  const variance =
-    values.reduce((total, value) => total + (value - mean) ** 2, 0) /
-    values.length;
 
+  // Detect arithmetic overflow instead of returning misleading statistics.
+  const sum = values.reduce((total, value) => total + value, 0);
+  if (!Number.isFinite(sum)) {
+    throw new Error("Statistics calculation overflowed while summing values.");
+  }
+
+  const mean = sum / values.length;
+  const squaredDeviations = values.reduce(
+    (total, value) => total + (value - mean) ** 2,
+    0,
+  );
+
+  const populationVariance = squaredDeviations / values.length;
+  const populationStdDev = Math.sqrt(populationVariance);
+
+  if (
+    !Number.isFinite(mean) ||
+    !Number.isFinite(populationVariance) ||
+    !Number.isFinite(populationStdDev)
+  ) {
+    throw new Error("Statistics calculation produced a non-finite result.");
+  }
+
+  const middle = Math.floor(sorted.length / 2);
   const median =
     sorted.length % 2 === 1
-      ? sorted[Math.floor(sorted.length / 2)]
-      : (sorted[sorted.length / 2 - 1] +
-          sorted[sorted.length / 2]) /
-        2;
+      ? sorted[middle]
+      : sorted[middle - 1] / 2 + sorted[middle] / 2;
 
   return {
     count: values.length,
@@ -76,8 +93,16 @@ function calculateStats(values: number[]) {
     max: sorted[sorted.length - 1],
     mean,
     median,
-    populationVariance: variance,
-    populationStdDev: Math.sqrt(variance),
+    populationVariance,
+    populationStdDev,
+    sampleVariance:
+      values.length > 1
+        ? (squaredDeviations / (values.length - 1))
+        : null,
+    sampleStdDev:
+      values.length > 1
+        ? Math.sqrt(squaredDeviations / (values.length - 1))
+        : null,
   };
 }
 
@@ -85,36 +110,60 @@ function calculateReturns(values: number[]) {
   if (values.length < 2) {
     throw new Error("At least two prices are required.");
   }
+
   if (!finiteNumbers(values)) {
     throw new Error("All prices must be finite numbers.");
+  }
+
+  // This helper is for conventional positive-valued price series,
+  // such as EUR/USD, not instruments that can trade at zero or below.
+  if (values.some((price) => price <= 0)) {
+    throw new Error(
+      "All prices must be positive for conventional simple-return calculations.",
+    );
   }
 
   const returns: number[] = [];
 
   for (let i = 1; i < values.length; i++) {
-    if (values[i - 1] === 0) {
-      throw new Error("A previous price cannot be zero.");
+    const simpleReturn = values[i] / values[i - 1] - 1;
+
+    if (!Number.isFinite(simpleReturn)) {
+      throw new Error(
+        `Return calculation produced a non-finite result at index ${i}.`,
+      );
     }
-    returns.push(values[i] / values[i - 1] - 1);
+
+    returns.push(simpleReturn);
   }
 
   return returns;
 }
 
-function calculateMaxDrawdown(prices: number[]) {
-  if (prices.length === 0 || !finiteNumbers(prices)) {
-    throw new Error("Provide a non-empty array of finite prices.");
+function calculateMaxDrawdown(equity: number[]) {
+  if (equity.length === 0 || !finiteNumbers(equity)) {
+    throw new Error("Provide a non-empty array of finite equity values.");
   }
 
-  let peak = prices[0];
+  if (equity.some((value) => value <= 0)) {
+    throw new Error(
+      "Maximum percentage drawdown requires strictly positive equity values.",
+    );
+  }
+
+  let peak = equity[0];
   let maxDrawdown = 0;
 
-  for (const price of prices) {
-    peak = Math.max(peak, price);
+  for (const value of equity) {
+    peak = Math.max(peak, value);
 
-    if (peak > 0) {
-      maxDrawdown = Math.max(maxDrawdown, (peak - price) / peak);
+    const drawdown = (peak - value) / peak;
+
+    if (!Number.isFinite(drawdown)) {
+      throw new Error("Drawdown calculation produced a non-finite result.");
     }
+
+    maxDrawdown = Math.max(maxDrawdown, drawdown);
   }
 
   return maxDrawdown;
