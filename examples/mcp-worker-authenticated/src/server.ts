@@ -551,7 +551,13 @@ function calculateHacMeanTTest(
   if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) {
     throw new Error("alpha must be strictly between 0 and 1.");
   }
-
+  if (values.every((value) => value === values[0])) {
+    throw new Error(
+      "The HAC mean test is undefined for constant returns: " +
+        "the series has zero variance.",
+    );
+  }
+  
   const stats = calculateStats(values);
   const n = values.length;
   const mean = stats.mean;
@@ -605,7 +611,13 @@ function calculateHacMeanTTest(
     0,
     Math.min(n - 1, Math.round(rawBandwidth)),
   );
-
+  
+  const bandwidthWarning =
+    selectedLag > Math.floor(Math.sqrt(n))
+      ? "Selected HAC lag is large relative to sample size; " +
+        "asymptotic inference may be unreliable."
+      : null;
+  
   let longRunVariance = gamma0;
 
   for (let lag = 1; lag <= selectedLag; lag++) {
@@ -688,6 +700,7 @@ function calculateHacMeanTTest(
     lagSelectionMethod:
       "Andrews-style AR(1) plug-in bandwidth; Bartlett kernel",
     selectedLag,
+    bandwidthWarning,
     longRunVariance,
     hacVarianceOfMean,
     hacStandardError,
