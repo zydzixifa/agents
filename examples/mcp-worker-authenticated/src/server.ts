@@ -3,6 +3,7 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { AuthHandler } from "./auth-handler";
+import { compactText } from "./market-filters";
 
 interface Env {
   FINNHUB_API_KEY?: string;
@@ -350,8 +351,7 @@ function createServer(env: Env) {
               !Array.isArray(item),
           )
           .map((item) => {
-            const rawSummary =
-              typeof item.summary === "string" ? item.summary : null;
+            const rawSummary = compactText(item.summary, 500);
 
             return {
               headline:
