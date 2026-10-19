@@ -169,6 +169,307 @@ function calculateMaxDrawdown(equity: number[]) {
   return maxDrawdown;
 }
 
+function logGamma(z: number): number {
+  const coefficients = [
+    676.5203681218851,
+    -1259.1392167224028,
+    771.3234287776531,
+    -176.6150291621406,
+    12.507343278686905,
+    -0.13857109526572012,
+    9.984369578019572e-6,
+    1.5056327351493116e-7,
+  ];
+
+  if (z < 0.5) {
+    return Math.log(Math.PI) -
+      Math.log(Math.sin(Math.PI * z)) -
+      logGamma(1 - z);
+  }
+
+  const shifted = z - 1;
+  let sum = 0.9999999999998099;
+
+  for (let i = 0; i < coefficients.length; i++) {
+    sum += coefficients[i] / (shifted + i + 1);
+  }
+
+  const t = shifted + coefficients.length - 0.5;
+
+  return (
+    0.9189385332046727 +
+    (shifted + 0.5) * Math.log(t) -
+    t +
+    Math.log(sum)
+  );
+}
+
+function betaContinuedFraction(
+  a: number,
+  b: number,
+  x: number,
+): number {
+  const maxIterations = 200;
+  const epsilon = 3e-14;
+  const tiny = 1e-300;
+  const qab = a + b;
+  const qap = a + 1;
+  const qam = a - 1;
+
+  let c = 1;
+  let d = 1 - (qab * x) / qap;
+
+  if (Math.abs(d) < tiny) d = tiny;
+  d = 1 / d;
+
+  let h = d;
+
+  for (let m = 1; m <= maxIterations; m++) {
+    const m2 = 2 * m;
+
+    let aa =
+      (m * (b - m) * x) /
+      ((qam + m2) * (a + m2));
+
+    d = 1 + aa * d;
+    if (Math.abs(d) < tiny) d = tiny;
+
+    c = 1 + aa / c;
+    if (Math.abs(c) < tiny) c = tiny;
+
+    d = 1 / d;
+    h *= d * c;
+
+    aa =
+      (-(a + m) * (qab + m) * x) /
+      ((a + m2) * (qap + m2));
+
+    d = 1 + aa * d;
+    if (Math.abs(d) < tiny) d = tiny;
+
+    c = 1 + aa / c;
+    if (Math.abs(c) < tiny) c = tiny;
+
+    d = 1 / d;
+
+    const delta = d * c;
+    h *= delta;
+
+    if (Math.abs(delta - 1) < epsilon) {
+      return h;
+    }
+  }
+
+  throw new Error("Student's t-distribution calculation did not converge.");
+}
+
+function regularizedBeta(
+  x: number,
+  a: number,
+  b: number,
+): number {
+  if (
+    !Number.isFinite(x) ||
+    !Number.isFinite(a) ||
+    !Number.isFinite(b) ||
+    a <= 0 ||
+    b <= 0 ||
+    x < 0 ||
+    x > 1
+  ) {
+    throw new Error("Invalid input to the beta distribution calculation.");
+  }
+
+  if (x === 0) return 0;
+  if (x === 1) return 1;
+
+  const factor = Math.exp(
+    logGamma(a + b) -
+    logGamma(a) -
+    logGamma(b) +
+    a * Math.log(x) +
+    b * Math.log1p(-x),
+  );
+
+  const result =
+    x < (a + 1) / (a + b + 2)
+      ? (factor * betaContinuedFraction(a, b, x)) / a
+      : 1 -
+        (factor * betaContinuedFraction(b, a, 1 - x)) / b;
+
+  if (!Number.isFinite(result)) {
+    throw new Error("Beta distribution calculation produced a non-finite result.");
+  }
+
+  return Math.max(0, Math.min(1, result));
+}
+
+function studentTCdf(t: number, degreesOfFreedom: number): number {
+  if (!Number.isFinite(t) || degreesOfFreedom <= 0) {
+    throw new Error("Invalid input to Student's t-distribution.");
+  }
+
+  if (t === 0) return 0.5;
+
+  const x =
+    degreesOfFreedom /
+    (degreesOfFreedom + t * t);
+
+  const beta = regularizedBeta(
+    x,
+    degreesOfFreedom / 2,
+    0.5,
+  );
+
+  const probability =
+    t > 0 ? 1 - beta / 2 : beta / 2;
+
+  if (!Number.isFinite(probability)) {
+    throw new Error("Student's t CDF produced a non-finite result.");
+  }
+
+  return Math.max(0, Math.min(1, probability));
+}
+
+function studentTQuantile(probability: number, df: number): number {
+  if (
+    !Number.isFinite(probability) ||
+    probability <= 0 ||
+    probability >= 1 ||
+    !Number.isInteger(df) ||
+    df < 1
+  ) {
+    throw new Error("Invalid Student's t quantile parameters.");
+  }
+
+  if (probability === 0.5) return 0;
+
+  if (probability < 0.5) {
+    return -studentTQuantile(1 - probability, df);
+  }
+
+  let lower = 0;
+  let upper = 1;
+
+  while (studentTCdf(upper, df) < probability) {
+    upper *= 2;
+
+    if (!Number.isFinite(upper) || upper > 1e150) {
+      throw new Error("Unable to bracket the Student's t quantile.");
+    }
+  }
+
+  for (let i = 0; i < 120; i++) {
+    const midpoint = lower + (upper - lower) / 2;
+
+    if (studentTCdf(midpoint, df) < probability) {
+      lower = midpoint;
+    } else {
+      upper = midpoint;
+    }
+  }
+
+  return lower + (upper - lower) / 2;
+}
+
+function calculateMeanTTest(
+  values: number[],
+  alternative: "greater" | "two-sided",
+  alpha: number,
+) {
+  if (values.length < 2 || !finiteNumbers(values)) {
+    throw new Error(
+      "The mean t-test requires at least two finite return observations.",
+    );
+  }
+
+  if (
+    !Number.isFinite(alpha) ||
+    alpha <= 0 ||
+    alpha >= 1
+  ) {
+    throw new Error("alpha must be strictly between 0 and 1.");
+  }
+
+  const stats = calculateStats(values);
+  const sampleStdDev = stats.sampleStdDev;
+
+  if (sampleStdDev === null || sampleStdDev === 0) {
+    throw new Error(
+      "The mean t-test requires a nonzero sample standard deviation.",
+    );
+  }
+
+  const n = values.length;
+  const degreesOfFreedom = n - 1;
+  const standardError = sampleStdDev / Math.sqrt(n);
+  const tStatistic = stats.mean / standardError;
+
+  if (
+    !Number.isFinite(standardError) ||
+    standardError <= 0 ||
+    !Number.isFinite(tStatistic)
+  ) {
+    throw new Error("The mean t-test produced an invalid statistic.");
+  }
+
+  const cdf = studentTCdf(tStatistic, degreesOfFreedom);
+  const pValue =
+    alternative === "greater"
+      ? 1 - cdf
+      : 2 * Math.min(cdf, 1 - cdf);
+
+  const criticalValue = studentTQuantile(
+    alternative === "greater" ? 1 - alpha : 1 - alpha / 2,
+    degreesOfFreedom,
+  );
+
+  const confidenceInterval =
+    alternative === "greater"
+      ? {
+          level: 1 - alpha,
+          type: "one-sided_lower_bound",
+          lowerBound: stats.mean - criticalValue * standardError,
+          upperBound: null,
+        }
+      : {
+          level: 1 - alpha,
+          type: "two-sided_interval",
+          lowerBound: stats.mean - criticalValue * standardError,
+          upperBound: stats.mean + criticalValue * standardError,
+        };
+
+  if (
+    !Number.isFinite(pValue) ||
+    !Number.isFinite(criticalValue) ||
+    !Number.isFinite(confidenceInterval.lowerBound) ||
+    (confidenceInterval.upperBound !== null &&
+      !Number.isFinite(confidenceInterval.upperBound))
+  ) {
+    throw new Error("The mean t-test produced a non-finite result.");
+  }
+
+  return {
+    observationCount: n,
+    mean: stats.mean,
+    sampleStdDev,
+    standardError,
+    tStatistic,
+    degreesOfFreedom,
+    alternative,
+    nullMean: 0,
+    alpha,
+    pValue: Math.max(0, Math.min(1, pValue)),
+    confidenceInterval,
+    assumptions: [
+      "Input values must be net periodic returns, not prices.",
+      "The classical one-sample t-test assumes independent observations from a suitable distribution.",
+      "This test does not correct for serial correlation, heteroskedasticity, multiple testing, or selection on the same evaluation data.",
+      "A statistically significant result does not by itself establish a robust or economically tradable edge.",
+    ],
+  };
+}
+
 // These candles are deterministic DEMO DATA, not historical market data.
 function makeSimulatedCandles(
   symbol: SymbolName,
@@ -798,23 +1099,23 @@ function createServer(env: Env) {
         `Historical coverage cannot be verified for ${symbol} on ${timeframe}. Broker history retrieval is not implemented; no coverage check was performed.`,
       ),
   );
-
+  
   // 15. Quantitative equations: use caller-supplied data only
   server.registerTool(
     "run_quant_equations",
     {
       description:
-        "Calculate descriptive statistics, simple returns, volatility, and maximum drawdown from supplied numeric observations. Does not fetch market data or generate trading signals. Supply chronologically ordered observations and ensure their meaning and frequency match the selected calculation.",
+        "Calculate descriptive statistics, simple returns, volatility, maximum drawdown, and a one-sample mean t-test from supplied numeric observations. Does not fetch market data or generate trading signals.",
       inputSchema: {
         values: z
           .array(z.number())
           .min(1)
           .max(10000)
           .describe(
-            "Numeric observations in chronological order, oldest first. Use appropriate price or equity values for return and drawdown calculations.",
+            "Numeric observations in chronological order, oldest first. For meanTTest, supply net periodic returns, not prices.",
           ),
         operation: z
-          .enum(["statistics", "returns", "risk"])
+          .enum(["statistics", "returns", "risk", "meanTTest"])
           .optional()
           .describe(
             "Calculation to perform; defaults to descriptive statistics.",
@@ -826,11 +1127,32 @@ function createServer(env: Env) {
           .max(1000000)
           .optional()
           .describe(
-            "Annualization periods for risk calculations. Defaults to 252; select a value appropriate for the observation frequency.",
+            "Annualization periods for risk calculations. Defaults to 252.",
+          ),
+        alternative: z
+          .enum(["greater", "two-sided"])
+          .optional()
+          .describe(
+            "For meanTTest: test whether the mean return is positive or differs from zero. Defaults to greater.",
+          ),
+        alpha: z
+          .number()
+          .finite()
+          .gt(0)
+          .lt(1)
+          .optional()
+          .describe(
+            "For meanTTest: significance level strictly between 0 and 1. Defaults to 0.05.",
           ),
       },
     },
-    async ({ values, operation, periodsPerYear }) => {
+    async ({
+      values,
+      operation,
+      periodsPerYear,
+      alternative,
+      alpha,
+    }) => {
       if (!finiteNumbers(values)) {
         return errorResult("All input values must be finite numbers.");
       }
@@ -855,6 +1177,17 @@ function createServer(env: Env) {
             simpleReturns: calculateReturns(values),
             note:
               "Returns are calculated from the supplied observations in their given order. Confirm that the observations are suitable for return calculations.",
+          });
+        }
+
+        if (selectedOperation === "meanTTest") {
+          return textResult({
+            operation: selectedOperation,
+            ...calculateMeanTTest(
+              values,
+              alternative ?? "greater",
+              alpha ?? 0.05,
+            ),
           });
         }
 
@@ -887,7 +1220,7 @@ function createServer(env: Env) {
       }
     },
   );
-  
+
   // 16. Market summary: refuses to summarize fabricated prices as live
   server.registerTool(
     "get_market_summary",
