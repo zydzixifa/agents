@@ -254,15 +254,17 @@ function createServer(env: Env) {
           "Configured credentials do not prove connectivity. No live quote or candle feed is implemented by this status tool.",
       }),
   );
-
+  
   // 4. Quote: intentionally simulated
   server.registerTool(
     "get_market_quote",
     {
       description:
-        "Return a clearly labelled simulated quote. This is not a live price.",
+        "Return one clearly labelled simulated quote for a single supported symbol. Call only for the specific instrument needed. This is not a live market price; the timestamp is the demo generation time.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single supported instrument to retrieve."),
       },
     },
     async ({ symbol }) =>
@@ -270,14 +272,15 @@ function createServer(env: Env) {
         symbol,
         source: "SIMULATED_DEMO",
         isLive: false,
-        warning: "Do not use this quote for real trading decisions.",
+        warning:
+          "Demo bid/ask values are hardcoded examples, not real market prices. Do not use them for trading decisions.",
         bid: symbol === "XAUUSD" ? 3000.1 : 1.08,
         ask: symbol === "XAUUSD" ? 3000.6 : 1.0802,
         timestamp: new Date().toISOString(),
+        timestampMeaning: "Demo generation time, not a market-data timestamp.",
       }),
   );
-
-  
+ 
   // 5. Candles: intentionally simulated
   server.registerTool(
     "get_market_candles",
@@ -580,29 +583,51 @@ function createServer(env: Env) {
       }
     },
   );  
-
+  
   // 8. Supported symbols
   server.registerTool(
     "list_symbols",
     {
-      description: "List symbols supported by this server's tool interface.",
-      inputSchema: {},
+      description:
+        "List supported symbols, optionally filtering by a case-insensitive substring. Use the search filter when looking for a specific instrument. This is the server's configured list, not a verified broker symbol list.",
+      inputSchema: {
+        search: z
+          .string()
+          .optional()
+          .describe(
+            "Optional case-insensitive search text, such as EUR, GBP, or XAU.",
+          ),
+      },
     },
-    async () =>
-      textResult({
-        symbols: SUPPORTED_SYMBOLS,
+    async ({ search }) => {
+      const query = search?.trim().toUpperCase();
+
+      const symbols = query
+        ? SUPPORTED_SYMBOLS.filter((symbol) =>
+            symbol.toUpperCase().includes(query),
+          )
+        : SUPPORTED_SYMBOLS;
+
+      return textResult({
+        symbols,
+        count: symbols.length,
+        search: query || null,
         note:
           "This is the server's configured symbol list, not a verified broker symbol list.",
-      }),
+      });
+    },
   );
-
+  
   // 9. Symbol information
   server.registerTool(
     "symbol_info",
     {
-      description: "Return basic configured metadata for a supported symbol.",
+      description:
+        "Return configuration and verification status for one supported symbol. This does not provide verified broker contract specifications, live prices, or proof that the symbol is tradable.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single supported symbol to inspect."),
       },
     },
     async ({ symbol }) =>
@@ -611,24 +636,34 @@ function createServer(env: Env) {
         configured: true,
         brokerVerified: false,
         marketDataVerified: false,
+        specificationsAvailable: false,
         note:
-          "Broker-specific contract details have not been retrieved from MetaApi.",
+          "Only server configuration is confirmed. Broker-specific contract details and market-data availability have not been retrieved from MetaApi.",
       }),
   );
-
+  
   // 10. Ticks: MetaApi not yet integrated
   server.registerTool(
     "get_ticks",
     {
-      description: "Get tick data when MetaApi integration is implemented.",
+      description:
+        "Placeholder only: live tick retrieval is not implemented because MetaApi is not integrated. Calling this tool will not retrieve market data.",
       inputSchema: {
         symbol: z.enum(SUPPORTED_SYMBOLS),
-        limit: z.number().int().min(1).max(1000).optional(),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .optional()
+          .describe(
+            "Reserved for the future implementation; maximum 1000 ticks per request.",
+          ),
       },
     },
-    async () =>
+    async ({ symbol }) =>
       errorResult(
-        "MetaApi tick retrieval is not implemented. No live tick data is available.",
+        `Live tick retrieval is not implemented for ${symbol}. MetaApi is not integrated; no live tick data was retrieved.`,
       ),
   );
 
@@ -636,80 +671,114 @@ function createServer(env: Env) {
   server.registerTool(
     "get_rates",
     {
-      description: "Get historical broker rates when MetaApi is integrated.",
+      description:
+        "Placeholder only: historical broker-rate retrieval is not implemented because MetaApi is not integrated. This tool does not return historical prices.",
       inputSchema: {
         symbol: z.enum(SUPPORTED_SYMBOLS),
         timeframe: z.enum(TIMEFRAMES),
-        count: z.number().int().min(1).max(5000).optional(),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .optional()
+          .describe(
+            "Reserved for the future implementation; maximum 5000 rates per request.",
+          ),
       },
     },
-    async () =>
+    async ({ symbol, timeframe }) =>
       errorResult(
-        "MetaApi historical-rate retrieval is not implemented. Use get_market_candles only to test the simulated demo response.",
+        `Historical-rate retrieval is not implemented for ${symbol} on ${timeframe}. MetaApi is not integrated; no historical rates were retrieved. Use get_market_candles only for clearly labelled simulated demo data.`,
       ),
   );
-
-  // 12. Market specifications
+  
+  // 12. Market specifications: MetaApi not yet integrated
   server.registerTool(
     "get_market_specs",
     {
       description:
-        "Retrieve broker contract specifications when MetaApi is integrated.",
+        "Placeholder only: verified broker contract specifications are not available because MetaApi integration has not been implemented. This tool does not return actual trading specifications.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single supported instrument to inspect."),
       },
     },
-    async () =>
+    async ({ symbol }) =>
       errorResult(
-        "Broker market specifications are unavailable until MetaApi integration is implemented and verified.",
+        `Verified broker contract specifications are unavailable for ${symbol}. MetaApi integration has not been implemented and verified; no actual contract specifications were retrieved.`,
       ),
   );
-
-  // 13. Spread profile
+  
+  // 13. Spread profile: real tick data not yet integrated
   server.registerTool(
     "spread_profile",
     {
       description:
-        "Analyze historical spreads once real broker tick data is available.",
+        "Placeholder only: historical spread analysis is unavailable until real broker bid/ask tick history is integrated and verified. This tool does not calculate actual spreads.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single supported instrument to inspect."),
       },
     },
-    async () =>
+    async ({ symbol }) =>
       errorResult(
-        "Spread profiling requires real tick and bid/ask history, which is not yet integrated.",
+        `Spread profiling is unavailable for ${symbol}. Real broker tick data and historical bid/ask records are not yet integrated; no spread analysis was performed.`,
       ),
   );
 
-  // 14. History coverage
+  // 14. History coverage: broker history retrieval not yet integrated
   server.registerTool(
     "history_coverage",
     {
       description:
-        "Check broker history coverage once MetaApi history retrieval is implemented.",
+        "Placeholder only: broker historical-data coverage cannot be verified until real history retrieval is implemented. This tool does not inspect simulated demo candles or claim broker history is available.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
-        timeframe: z.enum(TIMEFRAMES),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single supported instrument to inspect."),
+        timeframe: z
+          .enum(TIMEFRAMES)
+          .describe("The timeframe whose broker history coverage is requested."),
       },
     },
-    async () =>
+    async ({ symbol, timeframe }) =>
       errorResult(
-        "Historical coverage cannot be verified until broker history retrieval is implemented.",
+        `Historical coverage cannot be verified for ${symbol} on ${timeframe}. Broker history retrieval is not implemented; no coverage check was performed.`,
       ),
   );
 
-  // 15. Quantitative calculations
+  // 15. Quantitative equations: use caller-supplied data only
   server.registerTool(
     "run_quant_equations",
     {
       description:
-        "Calculate descriptive statistics, returns, volatility and drawdown from supplied numbers.",
+        "Calculate descriptive statistics, simple returns, volatility, and maximum drawdown from supplied numeric observations. Does not fetch market data or generate trading signals. Supply chronologically ordered observations and ensure their meaning and frequency match the selected calculation.",
       inputSchema: {
-        values: z.array(z.number()).min(1).max(10000),
+        values: z
+          .array(z.number())
+          .min(1)
+          .max(10000)
+          .describe(
+            "Numeric observations in chronological order, oldest first. Use appropriate price or equity values for return and drawdown calculations.",
+          ),
         operation: z
           .enum(["statistics", "returns", "risk"])
-          .optional(),
-        periodsPerYear: z.number().positive().optional(),
+          .optional()
+          .describe(
+            "Calculation to perform; defaults to descriptive statistics.",
+          ),
+        periodsPerYear: z
+          .number()
+          .finite()
+          .min(1)
+          .max(1000000)
+          .optional()
+          .describe(
+            "Annualization periods for risk calculations. Defaults to 252; select a value appropriate for the observation frequency.",
+          ),
       },
     },
     async ({ values, operation, periodsPerYear }) => {
@@ -723,23 +792,31 @@ function createServer(env: Env) {
         if (selectedOperation === "statistics") {
           return textResult({
             operation: selectedOperation,
+            observationCount: values.length,
             stats: calculateStats(values),
+            note:
+              "Descriptive statistics only. Interpret results according to the units and meaning of the supplied observations.",
           });
         }
 
         if (selectedOperation === "returns") {
           return textResult({
             operation: selectedOperation,
+            observationCount: values.length,
             simpleReturns: calculateReturns(values),
+            note:
+              "Returns are calculated from the supplied observations in their given order. Confirm that the observations are suitable for return calculations.",
           });
         }
 
         const returns = calculateReturns(values);
         const stats = calculateStats(returns);
-        const annualizationFactor = Math.sqrt(periodsPerYear ?? 252);
+        const annualizationPeriods = periodsPerYear ?? 252;
+        const annualizationFactor = Math.sqrt(annualizationPeriods);
 
         return textResult({
           operation: selectedOperation,
+          observationCount: values.length,
           returnCount: returns.length,
           meanPeriodReturn: stats.mean,
           periodVolatility: stats.populationStdDev,
@@ -749,9 +826,9 @@ function createServer(env: Env) {
           assumptions: {
             returnType: "simple returns",
             volatility: "population standard deviation",
-            annualizationPeriods: periodsPerYear ?? 252,
+            annualizationPeriods,
             note:
-              "Annualization factor is user-selected or defaults to 252 periods; ensure it matches the data frequency.",
+              "Annualized volatility assumes the selected annualization periods are appropriate for the observation frequency. Maximum drawdown is calculated from the supplied series.",
           },
         });
       } catch (error) {
@@ -761,41 +838,66 @@ function createServer(env: Env) {
       }
     },
   );
-
+  
   // 16. Market summary: refuses to summarize fabricated prices as live
   server.registerTool(
     "get_market_summary",
     {
       description:
-        "Report market-data readiness for a supported symbol without inventing live analysis.",
+        "Check live market-data readiness for one supported symbol and optional timeframe. This tool does not fetch prices or perform technical analysis. Never interpret its response as a trading signal.",
       inputSchema: {
-        symbol: z.enum(SUPPORTED_SYMBOLS),
-        timeframe: z.enum(TIMEFRAMES).optional(),
+        symbol: z
+          .enum(SUPPORTED_SYMBOLS)
+          .describe("The single instrument to check."),
+        timeframe: z
+          .enum(TIMEFRAMES)
+          .optional()
+          .describe("Optional timeframe to check; defaults to H1."),
       },
     },
     async ({ symbol, timeframe }) =>
       textResult({
         symbol,
         timeframe: timeframe ?? "H1",
+        source: "READINESS_CHECK",
+        isLive: false,
         liveQuoteAvailable: false,
         liveCandlesAvailable: false,
-        summary: "Insufficient verified live market data for a market summary.",
+        technicalAnalysisPerformed: false,
+        summary:
+          "Insufficient verified live market data for a market summary.",
         nextRequirement:
           "Integrate and verify a real market-data provider before calculating technical signals.",
       }),
   );
-
+  
   // 17. Instrument comparison
   server.registerTool(
     "compare_instruments",
     {
       description:
-        "Compare user-supplied numeric observations for two instruments.",
+        "Compare user-supplied numeric observations for exactly two instruments. Does not fetch market data. Supply only the observations needed for the comparison, and ensure both series are comparable before interpreting the results.",
       inputSchema: {
-        instrumentA: z.string().min(1),
-        valuesA: z.array(z.number()).min(1).max(10000),
-        instrumentB: z.string().min(1),
-        valuesB: z.array(z.number()).min(1).max(10000),
+        instrumentA: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Name of the first instrument or data series."),
+        valuesA: z
+          .array(z.number())
+          .min(1)
+          .max(10000)
+          .describe("Finite numeric observations for the first series."),
+        instrumentB: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Name of the second instrument or data series."),
+        valuesB: z
+          .array(z.number())
+          .min(1)
+          .max(10000)
+          .describe("Finite numeric observations for the second series."),
       },
     },
     async ({ instrumentA, valuesA, instrumentB, valuesB }) => {
@@ -810,14 +912,16 @@ function createServer(env: Env) {
         return textResult({
           instrumentA: {
             name: instrumentA,
+            observationCount: valuesA.length,
             statistics: calculateStats(valuesA),
           },
           instrumentB: {
             name: instrumentB,
+            observationCount: valuesB.length,
             statistics: calculateStats(valuesB),
           },
           note:
-            "This compares supplied numbers only; it does not fetch market data or imply that the series have matching frequencies.",
+            "This compares supplied numbers only; it does not fetch market data. Matching units, sampling frequencies, time periods, and data meanings must be verified before interpreting the comparison.",
         });
       } catch (error) {
         return errorResult(
