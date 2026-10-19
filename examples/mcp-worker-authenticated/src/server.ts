@@ -277,16 +277,25 @@ function createServer(env: Env) {
       }),
   );
 
+  
   // 5. Candles: intentionally simulated
   server.registerTool(
     "get_market_candles",
     {
       description:
-        "Return simulated demo candles. These are not real historical prices.",
+        "Return simulated demo candles for one supported symbol and timeframe. Defaults to 20 candles, with a maximum of 500. Request only the candle count needed for the analysis. These are not real historical prices.",
       inputSchema: {
         symbol: z.enum(SUPPORTED_SYMBOLS),
         timeframe: z.enum(TIMEFRAMES),
-        count: z.number().int().min(1).max(500).optional(),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe(
+            "Number of simulated candles to return; defaults to 20. Request the smallest count sufficient for the task.",
+          ),
       },
     },
     async ({ symbol, timeframe, count }) =>
@@ -304,6 +313,7 @@ function createServer(env: Env) {
           "Generated demonstration candles; not suitable for backtesting or trading.",
       }),
   );
+
 
   // 6. Finnhub news
   server.registerTool(
